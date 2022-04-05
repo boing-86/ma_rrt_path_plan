@@ -49,7 +49,10 @@ A brief introduction to the main steps of the proposed algorithm is given in my 
 
 
 ---
-Edit. Jeong Boin, Sunmyung Lee(github.com/leesunmyung), Sujin Shin (FROZEN Team from Sookmyung Women's University)
+Edit. FROZEN Team from Sookmyung Women's University
+Jeong Boin : Decision - System Architecture Design, Motion Planning(+local purepursuit), Module Integration
+Sunmyung Lee(github.com/leesunmyung) : Perception - LiDAR Sensor Programming, Bounding Box & Distance Data Callback
+Sujin Shin : Control - PID, PD control(longtitudinal Control), Purepursuit(latitudinal Control)
 
 
 #### Inputs
@@ -65,7 +68,7 @@ Edit. Jeong Boin, Sunmyung Lee(github.com/leesunmyung), Sujin Shin (FROZEN Team 
 #### Parameters to tune (main)
 - Same as the original
 
-#### More
+#### Architecture & Configuration + etc...
 ![슬라이드1](https://user-images.githubusercontent.com/54930076/161677596-2bfe92a0-5c2f-4ac8-85b1-d842ed102bf3.png)
 ![슬라이드4](https://user-images.githubusercontent.com/54930076/161677605-ccdb9f20-6522-40ed-ba9a-39ffc710892c.png)
 ![슬라이드5](https://user-images.githubusercontent.com/54930076/161677607-345cf3fc-0bc3-40f3-aed6-14f59db2832f.png)
