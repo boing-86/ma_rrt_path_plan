@@ -1,41 +1,30 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 RRT Path Planning with multiple remote goals.
 
 author: Maxim Yastremsky(@MaxMagazin)
 based on the work of AtsushiSakai(@Atsushi_twi)
-
 """
+
 import rospy
 import csv
-
 import ma_rrt
+import numpy as np
+import time, math
 
-from egn_messages.msg import Map
-from egn_messages.msg import CarSensors
-from egn_messages.msg import WaypointsArray
-from egn_messages.msg import Waypoint
-
+from vehicle_msgs.msg import TrackCone, Track, Command, Waypoint, WaypointsArray
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path
-
-# For odometry message
-from tf.transformations import euler_from_quaternion
-
 from scipy.spatial import Delaunay
 
-# Matrix/Array library
-import numpy as np
-import time, math
-
 class MaRRTPathPlanNode:
-    # All variables, placed here are static
 
     def __init__(self):
-        # Get all parameters from launch file
         self.shouldPublishWaypoints = rospy.get_param('~publishWaypoints', True)
         self.shouldPublishPredefined = rospy.get_param('~publishPredefined', False)
 
@@ -45,19 +34,25 @@ class MaRRTPathPlanNode:
         if rospy.has_param('~filename'):
             self.filename = rospy.get_param('~filename')
 
+        if rospy.has_param('~odom_topic'):
+            self.odometry_topic = rospy.get_param('~odom_topic')
+        else:
+            self.odometry_topic = "/odometry"
+
+        if rospy.has_param('~world_frame'):
+            self.world_frame = rospy.get_param('~world_frame')
+        else:
+            self.world_frame = "velodyne"
+
         waypointsFrequency = rospy.get_param('~desiredWaypointsFrequency', 5)
         self.waypointsPublishInterval = 1.0 / waypointsFrequency
         self.lastPublishWaypointsTime = 0
 
-        # All Subs and pubs
-        rospy.Subscriber("/map", Map, self.mapCallback)
-        rospy.Subscriber("/odometry", Odometry, self.odometryCallback)
-        # rospy.Subscriber("/car_sensors", CarSensors, self.carSensorsCallback)
+        rospy.Subscriber("/track", Track, self.mapCallback)
 
-        # Create publishers
         self.waypointsPub = rospy.Publisher("/waypoints", WaypointsArray, queue_size=0)
+        self.newwaypointsPub = rospy.Publisher("/newwaypoints", WaypointsArray, queue_size=5)
 
-        # visuals
         self.treeVisualPub = rospy.Publisher("/visual/tree_marker_array", MarkerArray, queue_size=0)
         self.bestBranchVisualPub = rospy.Publisher("/visual/best_tree_branch", Marker, queue_size=1)
         self.filteredBranchVisualPub = rospy.Publisher("/visual/filtered_tree_branch", Marker, queue_size=1)
@@ -72,79 +67,39 @@ class MaRRTPathPlanNode:
         self.savedWaypoints = []
         self.preliminaryLoopClosure = False
         self.loopClosure = False
-
         self.rrt = None
-
-        if self.shouldPublishPredefined:
-            with open(self.path + self.filename) as csv_file:
-                csv_reader = csv.reader(csv_file, delimiter=',')
-
-                for row in csv_reader:
-                    self.savedWaypoints.append((float(row[0]), float(row[1])))
-
-                # print("predefinedWaypoints:", self.savedWaypoints)
-            self.preliminaryLoopClosure = True
-            self.loopClosure = True
-
         self.filteredBestBranch = []
         self.discardAmount = 0
-
-        # print("MaRRTPathPlanNode Constructor has been called")
 
     def __del__(self):
         print('MaRRTPathPlanNode: Destructor called.')
 
     def odometryCallback(self, odometry):
-        # rospy.loginfo("odometryCallback")
-
-        # start = time.time()
-        orientation_q = odometry.pose.pose.orientation
-        orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
-        (roll, pitch, yaw)  = euler_from_quaternion(orientation_list)
-
         self.carPosX = odometry.pose.pose.position.x
         self.carPosY = odometry.pose.pose.position.y
-        self.carPosYaw = yaw
-        #print "Estimated processing odometry callback: {0} ms".format((time.time() - start)*1000)
 
-    def carSensorsCallback(self, carSensors):
-        # rospy.loginfo("carSensorsCallback")
+    def yawCallback(self, yaw):
+        self.carPosYaw = yaw.orientation.z
 
-        # start = time.time()
-        self.steerAngle = carSensors.steerAngle
-
-        #print "Estimated processing map callback: {0} ms".format((time.time() - start)*1000);
-
-    def mapCallback(self, map):
-        self.map = map
+    def mapCallback(self, track):
+        self.map = track.cones
 
     def sampleTree(self):
-        # sampleTreeStartTime = time.time()
-
         if self.loopClosure and len(self.savedWaypoints) > 0:
-            # print("Publish savedWaypoints/predifined waypoints, return")
             self.publishWaypoints()
             return
 
-        # print("------- sampleTree() -------");
-
         if not self.map:
-            # print "sampleTree(): map is still empty, return"
             return
-
-        # print "map size: {0}".format(len(self.map.cones));
 
         frontConesDist = 12
         frontCones = self.getFrontConeObstacles(self.map, frontConesDist)
-        # frontCones = [] # empty for tests
 
-        # print "frontCones size: {0}".format(len(frontCones));
-        # print(frontCones)
-
-        coneObstacleSize = 1.1
+        coneObstacleSize = 0.5 #height 68cm, base 37*37(cm2)
         coneObstacleList = []
         rrtConeTargets = []
         coneTargetsDistRatio = 0.5
+
         for cone in frontCones:
             coneObstacleList.append((cone.x, cone.y, coneObstacleSize))
 
@@ -153,94 +108,54 @@ class MaRRTPathPlanNode:
             if coneDist > frontConesDist * coneTargetsDistRatio:
                 rrtConeTargets.append((cone.x, cone.y, coneObstacleSize))
 
-        # Set Initial parameters
         start = [self.carPosX, self.carPosY, self.carPosYaw]
         iterationNumber = 1000
         planDistance = 12
         expandDistance = 1.0
         expandAngle = 20
 
-        # rrt planning
-        # planningStartTime = time.time()
         rrt = ma_rrt.RRT(start, planDistance, obstacleList=coneObstacleList, expandDis=expandDistance, turnAngle=expandAngle, maxIter=iterationNumber, rrtTargets = rrtConeTargets)
         nodeList, leafNodes = rrt.Planning()
-        # print "rrt.Planning(): {0} ms".format((time.time() - planningStartTime) * 1000);
-
-        # print "nodeList size: {0}".format(len(nodeList))
-        # print "leafNodes size: {0}".format(len(leafNodes))
 
         self.publishTreeVisual(nodeList, leafNodes)
 
         frontConesBiggerDist = 15
         largerGroupFrontCones = self.getFrontConeObstacles(self.map, frontConesBiggerDist)
 
-        # BestBranch
-        # findBesttBranchStartTime = time.time()
         bestBranch = self.findBestBranch(leafNodes, nodeList, largerGroupFrontCones, coneObstacleSize, expandDistance, planDistance)
-        # print "find best branch time: {0} ms".format((time.time() - findBesttBranchStartTime) * 1000);
-
-        # print "best branch", bestBranch
 
         if bestBranch:
             filteredBestBranch = self.getFilteredBestBranch(bestBranch)
-            # print "filteredBestBranch", filteredBestBranch
 
             if filteredBestBranch:
-                # Delaunay
-                # delaunayStartTime = time.time()
                 delaunayEdges = self.getDelaunayEdges(frontCones)
-                # print "delaunay time: {0} ms".format((time.time() - delaunayStartTime) * 1000);
-
                 self.publishDelaunayEdgesVisual(delaunayEdges)
-
-                # findWaypointsStartTime = time.time()
-
                 newWaypoints = []
 
                 if delaunayEdges:
-                    # print "len(delaunayEdges):", len(delaunayEdges)
-                    # print delaunayEdges
-
                     newWaypoints = self.getWaypointsFromEdges(filteredBestBranch, delaunayEdges)
-                # else:
-                #     print "newWaypoints from filteredBestBranch", newWaypoints
-                #     newWaypoints = [(node.x, node.y) for node in filteredBestBranch]
-
-                # print "find waypoints time: {0} ms".format((time.time() - findWaypointsStartTime) * 1000)
 
                 if newWaypoints:
-                    # print "newWaypoints:", waypoints
-
-                    # mergeWaypointsStartTime = time.time()
                     self.mergeWaypoints(newWaypoints)
-                    # print "merge waypoints time: {0} ms".format((time.time() - mergeWaypointsStartTime) * 1000);
 
                 self.publishWaypoints(newWaypoints)
 
-        # print "whole map callback: {0} ms".format((time.time() - sampleTreeStartTime)*1000);
-
     def mergeWaypoints(self, newWaypoints):
-        # print "mergeWaypoints:", "len(saved):", len(self.savedWaypoints), "len(new):", len(newWaypoints)
         if not newWaypoints:
-            return;
+            return
 
         maxDistToSaveWaypoints = 2.0
         maxWaypointAmountToSave = 2
-        waypointsDistTollerance = 0.5
+        waypointsDistTollerance = 1000
 
-        # check preliminary loopClosure
         if len(self.savedWaypoints) > 15:
             firstSavedWaypoint = self.savedWaypoints[0]
 
             for waypoint in reversed(newWaypoints):
                 distDiff = self.dist(firstSavedWaypoint[0], firstSavedWaypoint[1], waypoint[0], waypoint[1])
                 if distDiff < waypointsDistTollerance:
-                    self.preliminaryLoopClosure = True
-                    print "preliminaryLoopClosure = True"
+                    self.preliminaryLoopClosure = False
                     break
-
-        # print "savedWaypoints before:", self.savedWaypoints
-        # print "newWaypoints:", newWaypoints
 
         newSavedPoints = []
 
@@ -248,36 +163,28 @@ class MaRRTPathPlanNode:
             waypointCandidate = newWaypoints[i]
 
             carWaypointDist = self.dist(self.carPosX, self.carPosY, waypointCandidate[0], waypointCandidate[1])
-            # print "check candidate:", waypointCandidate, "with dist:", carWaypointDist
 
             if i >= maxWaypointAmountToSave or carWaypointDist > maxDistToSaveWaypoints:
-                # print "condition to break:", i, i >= maxWaypointAmountToSave,  "or", (carWaypointDist > maxDistToSaveWaypoints)
                 break
             else:
                 for savedWaypoint in reversed(self.savedWaypoints):
                     waypointsDistDiff = self.dist(savedWaypoint[0], savedWaypoint[1], waypointCandidate[0], waypointCandidate[1])
                     if waypointsDistDiff < waypointsDistTollerance:
-                        self.savedWaypoints.remove(savedWaypoint) #remove similar
-                        # print "remove this point:", savedWaypoint, "with diff:", waypointsDistDiff
+                        self.savedWaypoints.remove(savedWaypoint)
                         break
 
                 if (self.preliminaryLoopClosure):
                     distDiff = self.dist(firstSavedWaypoint[0], firstSavedWaypoint[1], waypointCandidate[0], waypointCandidate[1])
                     if distDiff < waypointsDistTollerance:
-                        self.loopClosure = True
-                        print "loopClosure = True"
+                        self.loopClosure = False
                         break
 
-                # print "add this point:", waypointCandidate
                 self.savedWaypoints.append(waypointCandidate)
                 newSavedPoints.append(waypointCandidate)
 
-        if newSavedPoints: # make self.savedWaypoints and newWaypoints having no intersection
+        if newSavedPoints:
             for point in newSavedPoints:
                 newWaypoints.remove(point)
-
-        # print "savedWaypoints after:", self.savedWaypoints
-        # print "newWaypoints after:", newWaypoints
 
     def getWaypointsFromEdges(self, filteredBranch, delaunayEdges):
         if not delaunayEdges:
@@ -290,15 +197,11 @@ class MaRRTPathPlanNode:
             a1 = np.array([node1.x, node1.y])
             a2 = np.array([node2.x, node2.y])
 
-            # print "node1:", node1
-            # print "node2:", node2
-
             maxAcceptedEdgeLength = 7
             maxEdgePartsRatio = 3
 
             intersectedEdges = []
             for edge in delaunayEdges:
-                # print "edge:", edge
 
                 b1 = np.array([edge.x1, edge.y1])
                 b2 = np.array([edge.x2, edge.y2])
@@ -308,24 +211,18 @@ class MaRRTPathPlanNode:
                         edge.intersection = self.getLineIntersection(a1, a2, b1, b2)
 
                         edgePartsRatio = edge.getPartsLengthRatio()
-                        # print "edgePartsRatio:", edgePartsRatio
 
                         if edgePartsRatio < maxEdgePartsRatio:
                             intersectedEdges.append(edge)
 
             if intersectedEdges:
-                # print "len(intersectedEdges):", len(intersectedEdges)
-                # print "intersectedEdges:", intersectedEdges
 
                 if len(intersectedEdges) == 1:
                     edge = intersectedEdges[0]
 
-                    # print "edge middle:", edge.getMiddlePoint()
                     waypoints.append(edge.getMiddlePoint())
                 else:
-                    # print "initial:", intersectedEdges
                     intersectedEdges.sort(key=lambda edge: self.dist(node1.x, node1.y, edge.intersection[0], edge.intersection[1], shouldSqrt = False))
-                    # print "sorted:", intersectedEdges
 
                     for edge in intersectedEdges:
                         waypoints.append(edge.getMiddlePoint())
@@ -333,7 +230,7 @@ class MaRRTPathPlanNode:
         return waypoints
 
     def getDelaunayEdges(self, frontCones):
-        if len(frontCones) < 4: # no sense to calculate delaunay
+        if len(frontCones) < 4:
             return
 
         conePoints = np.zeros((len(frontCones), 2))
@@ -342,13 +239,10 @@ class MaRRTPathPlanNode:
             cone = frontCones[i]
             conePoints[i] = ([cone.x, cone.y])
 
-        # print conePoints
         tri = Delaunay(conePoints)
-        # print "len(tri.simplices):", len(tri.simplices)
 
         delaunayEdges = []
         for simp in tri.simplices:
-            # print simp
 
             for i in range(3):
                 j = i + 1
@@ -369,55 +263,40 @@ class MaRRTPathPlanNode:
         if (time.time() - self.lastPublishWaypointsTime) < self.waypointsPublishInterval:
             return
 
-        # print "publishWaypoints(): start"
         waypointsArray = WaypointsArray()
-        waypointsArray.header.frame_id = "world"
+        newwaypointsArray = WaypointsArray()
+        waypointsArray.header.frame_id = self.world_frame
         waypointsArray.header.stamp = rospy.Time.now()
-
-        waypointsArray.preliminaryLoopClosure = self.preliminaryLoopClosure
-        waypointsArray.loopClosure = self.loopClosure
-
-        # if not self.savedWaypoints and newWaypoints:
-        #     firstWaypoint = newWaypoints[0]
-        #
-        #     auxWaypointMaxDist = 2
-        #
-        #     # auxilary waypoint to start
-        #     if self.dist(self.carPosX, self.carPosY, firstWaypoint[0], firstWaypoint[1]) > auxWaypointMaxDist:
-        #         waypointsArray.waypoints.append(Waypoint(0, self.carPosX, self.carPosY))
-        #         print "add aux point with car pos"
+        newwaypointsArray.header.frame_id = self.world_frame
+        newwaypointsArray.header.stamp = rospy.Time.now()
 
         for i in range(len(self.savedWaypoints)):
             waypoint = self.savedWaypoints[i]
             waypointId = len(waypointsArray.waypoints)
-            w = Waypoint(waypointId, waypoint[0], waypoint[1])
+            w = Waypoint(waypoint[0], waypoint[1], waypointId)
             waypointsArray.waypoints.append(w)
 
         if newWaypoints is not None:
             for i in range(len(newWaypoints)):
                 waypoint = newWaypoints[i]
                 waypointId = len(waypointsArray.waypoints)
-                w = Waypoint(waypointId, waypoint[0], waypoint[1])
+                w = Waypoint(waypoint[0], waypoint[1], waypointId)
                 waypointsArray.waypoints.append(w)
-                # print "added from newWaypoints:", waypointId, waypoint[0], waypoint[1]
+                newwaypointsArray.waypoints.append(w)
 
         if self.shouldPublishWaypoints:
-            # print "publish ros waypoints:", waypointsArray.waypoints
             self.waypointsPub.publish(waypointsArray)
-
+            self.newwaypointsPub.publish(newwaypointsArray)
             self.lastPublishWaypointsTime = time.time()
-
             self.publishWaypointsVisuals(newWaypoints)
 
-            # print "publishWaypoints(): len(waypointsArray.waypoints):", len(waypointsArray.waypoints)
-            # print "------"
 
     def publishWaypointsVisuals(self, newWaypoints = None):
 
         markerArray = MarkerArray()
 
         savedWaypointsMarker = Marker()
-        savedWaypointsMarker.header.frame_id = "world"
+        savedWaypointsMarker.header.frame_id = self.world_frame
         savedWaypointsMarker.header.stamp = rospy.Time.now()
         savedWaypointsMarker.lifetime = rospy.Duration(1)
         savedWaypointsMarker.ns = "saved-publishWaypointsVisuals"
@@ -441,7 +320,7 @@ class MaRRTPathPlanNode:
 
         if newWaypoints is not None:
             newWaypointsMarker = Marker()
-            newWaypointsMarker.header.frame_id = "world"
+            newWaypointsMarker.header.frame_id = self.world_frame
             newWaypointsMarker.header.stamp = rospy.Time.now()
             newWaypointsMarker.lifetime = rospy.Duration(1)
             newWaypointsMarker.ns = "new-publishWaypointsVisuals"
@@ -466,14 +345,6 @@ class MaRRTPathPlanNode:
         self.waypointsVisualPub.publish(markerArray)
 
     def getLineIntersection(self, a1, a2, b1, b2):
-        """
-        Returns the point of intersection of the lines passing through a2,a1 and b2,b1.
-        a1: [x, y] a point on the first line
-        a2: [x, y] another point on the first line
-        b1: [x, y] a point on the second line
-        b2: [x, y] another point on the second line
-        https://stackoverflow.com/questions/3252194/numpy-and-line-intersections
-        """
         s = np.vstack([a1,a2,b1,b2])        # s for stacked
         h = np.hstack((s, np.ones((4, 1)))) # h for homogeneous
         l1 = np.cross(h[0], h[1])           # get first line
@@ -484,14 +355,9 @@ class MaRRTPathPlanNode:
         return (x/z, y/z)
 
     def getLineSegmentIntersection(self, a1, a2, b1, b2):
-        # https://bryceboe.com/2006/10/23/line-segment-intersection-algorithm/
-        # Return true if line segments a1a2 and b1b2 intersect
-        # return ccw(A,C,D) != ccw(B,C,D) and ccw(A,B,C) != ccw(A,B,D)
         return self.ccw(a1,b1,b2) != self.ccw(a2,b1,b2) and self.ccw(a1,a2,b1) != self.ccw(a1,a2,b2)
 
     def ccw(self, A, B, C):
-        # if three points are listed in a counterclockwise order.
-        # return (C.y-A.y) * (B.x-A.x) > (B.y-A.y) * (C.x-A.x)
         return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
 
     def getFilteredBestBranch(self, bestBranch):
@@ -512,39 +378,34 @@ class MaRRTPathPlanNode:
                 filteredNode = self.filteredBestBranch[i]
 
                 dist = math.sqrt((node.x - filteredNode.x) ** 2 + (node.y - filteredNode.y) ** 2)
-                if dist > everyPointDistChangeLimit: # changed too much, skip this branch
+                if dist > everyPointDistChangeLimit:
                     shouldDiscard = True
                     self.discardAmount += 1
-                    # print "above DistChangeLimit:, shouldDiscard!,", "discAmount:", self.discardAmount
 
                     if self.discardAmount >= maxDiscardAmountForReset:
                         self.discardAmount = 0
                         self.filteredBestBranch = list(bestBranch)
-                        # print "broke maxDiscardAmountForReset:, Reset!"
                     break
 
                 changeRate += (everyPointDistChangeLimit - dist)
-            # print "branch changeRate: {0}".format(changeRate);
 
             if not shouldDiscard:
-            #     return
-            # else:
+
                 for i in range(len(bestBranch)):
                     self.filteredBestBranch[i].x = self.filteredBestBranch[i].x * (1 - newPointFilter) + newPointFilter * bestBranch[i].x
                     self.filteredBestBranch[i].y = self.filteredBestBranch[i].y * (1 - newPointFilter) + newPointFilter * bestBranch[i].y
 
                 self.discardAmount = 0
-                # print "reset discardAmount, ", "discAmount:", self.discardAmount
 
         self.publishFilteredBranchVisual()
-        return list(self.filteredBestBranch) # return copy
+        return list(self.filteredBestBranch)
 
     def publishDelaunayEdgesVisual(self, edges):
         if not edges:
             return
 
         marker = Marker()
-        marker.header.frame_id = "world"
+        marker.header.frame_id = self.world_frame
         marker.header.stamp = rospy.Time.now()
         marker.lifetime = rospy.Duration(1)
         marker.ns = "publishDelaunayLinesVisual"
@@ -578,16 +439,15 @@ class MaRRTPathPlanNode:
         coneDistanceLimitSq = coneDistLimit * coneDistLimit;
 
         bothSidesImproveFactor = 3
-        minAcceptableBranchRating = 80 # fits good fsg18
+        minAcceptableBranchRating = 80
 
         leafRatings = []
         for leaf in leafNodes:
             branchRating = 0
             node = leaf
-            # print " ===== calculating leaf node {0} ====== ".format(leaf)
+
             while node.parent is not None:
                 nodeRating = 0
-                # print "---- check node {0}".format(node)
 
                 leftCones = []
                 rightCones = []
@@ -599,11 +459,9 @@ class MaRRTPathPlanNode:
                         actualDist = math.sqrt(coneDistSq)
 
                         if actualDist < coneObstacleSize:
-                            # node can be really close to a cone, cause we have new cones in this comparison, so skip these ones
                             continue
 
                         nodeRating += (coneDistLimit - actualDist)
-                        # print "found close cone({1},{2}), rating: {0}".format(nodeRating, cone.x, cone.y)
 
                         if self.isLeftCone(node, nodeList[node.parent], cone):
                             leftCones.append(cone)
@@ -611,33 +469,22 @@ class MaRRTPathPlanNode:
                             rightCones.append(cone)
 
                 if ((len(leftCones) == 0 and len(rightCones)) > 0 or (len(leftCones) > 0 and len(rightCones) == 0)):
-                    # print "cones are only from one side, penalize rating"
                     nodeRating /= bothSidesImproveFactor
 
                 if (len(leftCones) > 0 and len(rightCones) > 0):
-                    # print "cones are from both sides, improve rating"
                     nodeRating *= bothSidesImproveFactor
 
-                # print "node.cost: {0}, node.rating: {1}".format(node.cost, nodeRating)
-
-                # make conversion: (expandDistance to planDistance) -> (1 to 2)
                 nodeFactor = (node.cost - expandDistance)/(planDistance - expandDistance) + 1
-                # print "nodeFactor: {0}".format(nodeFactor)
 
                 branchRating += nodeRating * nodeFactor
-                # branchRating += nodeRating
-                # print "current branch rating: {0}".format(branchRating)
                 node = nodeList[node.parent]
 
             leafRatings.append(branchRating)
-            # print "leaf node {0}, rating: {1}".format(leaf, branchRating)
 
-        # print leafRatings
         maxRating = max(leafRatings)
         maxRatingInd = leafRatings.index(maxRating)
 
         node = leafNodes[maxRatingInd]
-        # print "!!maxRating leaf node {0}, rating: {1}".format(node, maxRating)
 
         if maxRating < minAcceptableBranchRating:
             return
@@ -653,17 +500,15 @@ class MaRRTPathPlanNode:
         directBranch = []
         for n in reversed(reverseBranch):
             directBranch.append(n)
-            # print n
 
         return directBranch
 
     def isLeftCone(self, node, parentNode, cone):
-        # //((b.X - a.X)*(cone.Y - a.Y) - (b.Y - a.Y)*(cone.X - a.X)) > 0;
         return ((node.x - parentNode.x) * (cone.y - parentNode.y) - (node.y - parentNode.y) * (cone.x - parentNode.x)) > 0;
 
     def publishBestBranchVisual(self, nodeList, leafNode):
         marker = Marker()
-        marker.header.frame_id = "world"
+        marker.header.frame_id = self.world_frame
         marker.header.stamp = rospy.Time.now()
         marker.lifetime = rospy.Duration(0.2)
         marker.ns = "publishBestBranchVisual"
@@ -699,7 +544,7 @@ class MaRRTPathPlanNode:
             return
 
         marker = Marker()
-        marker.header.frame_id = "world"
+        marker.header.frame_id = self.world_frame
         marker.header.stamp = rospy.Time.now()
         marker.lifetime = rospy.Duration(0.2)
         marker.ns = "publisshFilteredBranchVisual"
@@ -733,7 +578,7 @@ class MaRRTPathPlanNode:
 
         # tree lines marker
         treeMarker = Marker()
-        treeMarker.header.frame_id = "world"
+        treeMarker.header.frame_id = self.world_frame
         treeMarker.header.stamp = rospy.Time.now()
         treeMarker.ns = "rrt"
 
@@ -760,7 +605,7 @@ class MaRRTPathPlanNode:
 
         # leaves nodes marker
         leavesMarker = Marker()
-        leavesMarker.header.frame_id = "world"
+        leavesMarker.header.frame_id = self.world_frame
         leavesMarker.header.stamp = rospy.Time.now()
         leavesMarker.lifetime = rospy.Duration(0.2)
         leavesMarker.ns = "rrt-leaves"
@@ -789,23 +634,18 @@ class MaRRTPathPlanNode:
             return []
 
         headingVector = self.getHeadingVector()
-        # print("headingVector:", headingVector)
-
         headingVectorOrt = [-headingVector[1], headingVector[0]]
-        # print("headingVectorOrt:", headingVectorOrt)
 
-        behindDist = 0.5
+        behindDist = 1.0
         carPosBehindPoint = [self.carPosX - behindDist * headingVector[0], self.carPosY - behindDist * headingVector[1]]
 
-        # print "carPos:", [self.carPosX, self.carPosY]
-        # print "carPosBehindPoint:", carPosBehindPoint
 
         frontDistSq = frontDist ** 2
 
         frontConeList = []
-        for cone in map.cones:
+        for cone in map:
             if (headingVectorOrt[0] * (cone.y - carPosBehindPoint[1]) - headingVectorOrt[1] * (cone.x - carPosBehindPoint[0])) < 0:
-                if ((cone.x - self.carPosX) ** 2 + (cone.y - self.carPosY) ** 2) < frontDistSq:
+                if ((cone.x) ** 2 + (cone.y) ** 2) < frontDistSq:
                     frontConeList.append(cone)
         return frontConeList
 
@@ -818,11 +658,11 @@ class MaRRTPathPlanNode:
     def getConesInRadius(self, map, x, y, radius):
         coneList = []
         radiusSq = radius * radius
-        for cone in map.cones:
+        for cone in map:
             if ((cone.x - x) ** 2 + (cone.y - y) ** 2) < radiusSq:
                 coneList.append(cone)
         return coneList
-
+    
 class Edge():
     def __init__(self, x1, y1, x2, y2):
         self.x1 = x1
@@ -855,16 +695,8 @@ class Edge():
     def __repr__(self):
         return str(self)
 
+
+
 if __name__ == '__main__':
 
-    a1 = np.array([0, 0])
-    a2 = np.array([5, 0])
-    b1 = np.array([0, 5])
-    b2 = np.array([5, 0])
-
     maNode = MaRRTPathPlanNode()
-
-    if maNode.getLineSegmentIntersection(a1, a2, b1, b2):
-        print "intersected"
-    else:
-        print "not intersected"

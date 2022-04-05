@@ -46,3 +46,34 @@ A brief introduction to the main steps of the proposed algorithm is given in my 
 ### MIT
 - Use me and my code in any way you want
 - Keep the names and the same licence
+
+
+---
+Edit. FROZEN Team from Sookmyung Women's University
+- Jeong Boin : Decision - System Architecture Design, Motion Planning(+local purepursuit), Module Integration
+- Sunmyung Lee(github.com/leesunmyung) : Perception - LiDAR Sensor Programming, Obstacle Recognition & Distance Data Callback
+- Sujin Shin : Control - PID, PD control(longtitudinal Control), Purepursuit(latitudinal Control)
+
+
+#### Inputs
+- rospy.Subscriber("/track", Track, ...)
+- rospy.Subscriber("/newwaypoints", WaypointsArray, ...)
+
+#### Outputs
+- rospy.Publisher("/waypoints", WaypointsArray, ...)
+
+#### Outputs (Visuals)
+- Same as the original
+
+#### Parameters to tune (main)
+- Same as the original
+
+#### Architecture & Configuration + etc...
+![슬라이드1](https://user-images.githubusercontent.com/54930076/161677596-2bfe92a0-5c2f-4ac8-85b1-d842ed102bf3.png)
+![슬라이드4](https://user-images.githubusercontent.com/54930076/161677605-ccdb9f20-6522-40ed-ba9a-39ffc710892c.png)
+![슬라이드5](https://user-images.githubusercontent.com/54930076/161677607-345cf3fc-0bc3-40f3-aed6-14f59db2832f.png)
+![슬라이드9](https://user-images.githubusercontent.com/54930076/161677609-d44d2be7-3a31-4589-ab2a-41158e3c4518.png)
+![슬라이드11](https://user-images.githubusercontent.com/54930076/161677613-8dade1d3-556b-4f90-8e0e-32c2bea1a5ff.png)
+![슬라이드16](https://user-images.githubusercontent.com/54930076/161677616-059680ce-35cf-423c-96d4-4956f2b85691.png)
+![슬라이드19](https://user-images.githubusercontent.com/54930076/161677620-2d4e4891-233a-4812-8f22-0f97c17c286d.png)
+
