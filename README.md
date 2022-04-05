@@ -51,7 +51,7 @@ A brief introduction to the main steps of the proposed algorithm is given in my 
 ---
 Edit. FROZEN Team from Sookmyung Women's University
 - Jeong Boin : Decision - System Architecture Design, Motion Planning(+local purepursuit), Module Integration
-- Sunmyung Lee(github.com/leesunmyung) : Perception - LiDAR Sensor Programming, Bounding Box & Distance Data Callback
+- Sunmyung Lee(github.com/leesunmyung) : Perception - LiDAR Sensor Programming, Obstacle Recognition & Distance Data Callback
 - Sujin Shin : Control - PID, PD control(longtitudinal Control), Purepursuit(latitudinal Control)
 
 
